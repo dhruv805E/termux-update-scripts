@@ -5,10 +5,10 @@ set -euo pipefail # Exit on error, unset variable, pipe failure
 DEFAULT_LOG_DIR="logs"
 DEFAULT_RETENTION_DAYS=7
 DEFAULT_VENV_DIR="myenv" # Default for your "myenv"
-DEFAULT_SCRIPT_URL="https://raw.githubusercontent.com/Dhruvpalsinghbose/update-scripts/main/full-update.sh" # CHANGE THIS if you host it elsewhere
+DEFAULT_SCRIPT_URL="https://raw.githubusercontent.com/dhruv805E/termux-update-scripts/main/full-update.sh" # CHANGE THIS if you host it elsewhere
 DEFAULT_REPO_DIR="~/myproject" # EXAMPLE: Path inside PRoot, adjust as needed
 DEFAULT_DEPENDENCIES=("git" "python3" "python3-pip" "python3-venv" "curl" "proot-distro" "awk" "tee" "grep" "df" "find" "date" "realpath" "cmp" "coreutils" "jq") # coreutils for sha256sum
-DEFAULT_EXPECTED_HASH_URL="https://raw.githubusercontent.com/Dhruvpalsinghbose/update-scripts/main/full-update.sh.sha256" # CHANGE THIS if you host it elsewhere
+DEFAULT_EXPECTED_HASH_URL="https://raw.githubusercontent.com/dhruv805E/termux-update-scripts/main/full-update.sh.sha256" # CHANGE THIS if you host it elsewhere
 DEFAULT_REQUIRED_SPACE_MB=500
 DEFAULT_GIT_REMOTE="origin"
 DEFAULT_GIT_BRANCH="main"
