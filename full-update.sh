@@ -5,9 +5,10 @@ set -euo pipefail # Exit on error, unset variable, pipe failure
 DEFAULT_LOG_DIR="logs"
 DEFAULT_RETENTION_DAYS=7
 DEFAULT_VENV_DIR="myenv" # Default for your "myenv"
+DEFAULT_DEPENDENCIES=("git" "python" "pip" "curl" "proot-distro" "awk" "tee" "grep" "df" "find" "date" "realpath" "cmp" "coreutils" "jq")
+
 DEFAULT_SCRIPT_URL="https://raw.githubusercontent.com/dhruv805E/termux-update-scripts/main/full-update.sh" # CHANGE THIS if you host it elsewhere
-DEFAULT_REPO_DIR="~/myproject" # EXAMPLE: Path inside PRoot, adjust as needed
-DEFAULT_DEPENDENCIES=("git" "python3" "python3-pip" "python3-venv" "curl" "proot-distro" "awk" "tee" "grep" "df" "find" "date" "realpath" "cmp" "coreutils" "jq") # coreutils for sha256sum
+DEFAULT_REPO_DIR="~/myproject" # EXAMPLE: Path inside PRoot (e.g. /root/myproject or /home/user/myproject), adjust as needed
 DEFAULT_EXPECTED_HASH_URL="https://raw.githubusercontent.com/dhruv805E/termux-update-scripts/main/full-update.sh.sha256" # CHANGE THIS if you host it elsewhere
 DEFAULT_REQUIRED_SPACE_MB=500
 DEFAULT_GIT_REMOTE="origin"
@@ -81,7 +82,7 @@ send_notification() {
     if command -v jq &>/dev/null; then
         encoded_text=$(printf '%s' "$text_to_send" | jq -s -R -r @uri)
     else
-        # Basic URL encoding fallback (may not cover all special characters as well as jq)
+        # Basic URL encoding fallback
         encoded_text=$(printf %s "$text_to_send" | awk 'BEGIN{while(getline l){gsub(/%/, "%25", l); gsub(/ /, "%20", l); gsub(/#/, "%23", l); gsub(/\$/, "%24", l); gsub(/&/, "%26", l); gsub(/\+/, "%2B", l); gsub(/,/, "%2C", l); gsub(/\//, "%2F", l); gsub(/:/, "%3A", l); gsub(/;/, "%3B", l); gsub(/=/, "%3D", l); gsub(/\?/, "%3F", l); gsub(/@/, "%40", l); gsub(/</, "%3C", l); gsub(/>/, "%3E", l); gsub(/\[/, "%5B", l); gsub(/\]/, "%5D", l); gsub(/\\/, "%5C", l); gsub(/\^/, "%5E", l); gsub(/`/, "%60", l); gsub(/{/, "%7B", l); gsub(/\|/, "%7C", l); gsub(/}/, "%7D", l); gsub(/~/, "%7E", l); print l}}')
         log "Warning: jq not found for robust URL encoding of Telegram message. Using basic fallback."
     fi
@@ -95,7 +96,7 @@ send_notification() {
     http_code=$(echo "$response" | tail -n1); http_body=$(echo "$response" | sed '$ d')
     if [[ "$http_code" -ne 200 ]]; then log "[ERROR] Failed to send Telegram notification. HTTP Code: $http_code. Response: $http_body"; return 1; fi
     log "Telegram notification sent successfully."
-  elif [[ "$NOTIFY" == true ]]; then log "Warning: Telegram notification requested (--notify) but TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID env vars are not set or empty."; return 1; fi
+  elif [[ "$NOTIFY" == true ]]; then log "Warning: Telegram notification requested (--notify) but TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables are not set or empty."; return 1; fi
   return 0
 }
 
@@ -113,7 +114,6 @@ retry() {
 }
 
 # === Argument Parsing ===
-# (Using refined parsing from user's later paste for handling --option=value and --option value)
 while [[ $# -gt 0 ]]; do
   key="$1"
   case $key in
@@ -131,24 +131,53 @@ while [[ $# -gt 0 ]]; do
     --git-branch) GIT_BRANCH="$2"; shift; shift ;;
     --log-dir=*) LOG_DIR="${key#*=}"; shift ;;
     --log-dir) LOG_DIR="$2"; shift; shift ;;
-    --retention=*) RETENTION_DAYS="${key#*=}"; shift ;; # Validation moved after loop
-    --retention) RETENTION_DAYS="$2"; shift; shift ;; # Validation moved after loop
-    --req-space=*) REQUIRED_SPACE_MB="${key#*=}"; shift ;; # Validation moved after loop
-    --req-space) REQUIRED_SPACE_MB="$2"; shift; shift ;; # Validation moved after loop
+    --retention=*) RETENTION_DAYS="${key#*=}"; shift ;; 
+    --retention) RETENTION_DAYS="$2"; shift; shift ;; 
+    --req-space=*) REQUIRED_SPACE_MB="${key#*=}"; shift ;; 
+    --req-space) REQUIRED_SPACE_MB="$2"; shift; shift ;; 
     -h|--help) usage ;;
     *) echo "[ERROR] Unknown option: $1" >&2; usage ;;
   esac
 done
 
-# Validate numeric options that were parsed
 if ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then echo "[ERROR] --retention value '$RETENTION_DAYS' is not a valid number." >&2; usage; fi
 if ! [[ "$REQUIRED_SPACE_MB" =~ ^[0-9]+$ ]]; then echo "[ERROR] --req-space value '$REQUIRED_SPACE_MB' is not a valid number." >&2; usage; fi
-
 
 # === Setup Logging ===
 mkdir -p "$LOG_DIR"
 LOGFILE="$LOG_DIR/update_$(date '+%Y-%m-%d_%H-%M-%S').log"
-trap 'echo "[ERROR] Script interrupted." | tee -a "$LOGFILE"; exit 1' EXIT SIGINT SIGTERM
+# This trap will catch EXIT, SIGINT, SIGTERM.
+# For self-update, `exec` replaces the process, so this trap doesn't fire for the old process then.
+# If script exits due to `set -e`, $? will be non-zero. If `exit 0`, $? is 0.
+SCRIPT_TRAP_EXIT_CODE=0
+cleanup_and_exit() {
+    local exit_code=$? 
+    # If SCRIPT_TRAP_EXIT_CODE is already set by our explicit exit, use that.
+    # This helps differentiate deliberate exits from `set -e` exits.
+    if [[ "$SCRIPT_TRAP_EXIT_CODE" -ne 0 ]]; then
+        exit_code="$SCRIPT_TRAP_EXIT_CODE"
+    fi
+
+    log "[INFO] Script exiting with code: $exit_code"
+    # Clean up any known global temporary files if needed here
+    # Example: rm -f "$TEMP_SCRIPT" "$TEMP_HASH_FILE" (if they were global)
+    
+    # Only print "interrupted" if it was an actual signal or unexpected error
+    if (( exit_code != 0 && exit_code != 130 && exit_code != 143 )); then # 130=SIGINT (Ctrl+C), 143=SIGTERM
+        # Avoid double "Script interrupted" if notify_error already called exit
+        # This requires notify_error to set SCRIPT_TRAP_EXIT_CODE before calling exit 1
+        # Or check if the last log message was already an error.
+        # For now, the simple message is acceptable.
+        echo "[ERROR] Script interrupted or exited with error." | tee -a "$LOGFILE"
+    elif (( exit_code == 130 || exit_code == 143 )); then
+        echo "[WARN] Script interrupted by signal (Ctrl+C or Term)." | tee -a "$LOGFILE"
+    fi
+    # The actual exit is handled by shell after trap finishes, or by `exit` in `notify_error`.
+    # To ensure a consistent exit code from the trap itself if `notify_error`'s `exit` is caught by `set -e` before trap:
+    # exit "$exit_code" # This might cause issues if trap is for normal exit.
+}
+trap 'cleanup_and_exit' EXIT SIGINT SIGTERM
+
 
 # === Initial Log Messages ===
 log "=== Starting Update Script ($SCRIPT_NAME) for NON-ROOTED device ==="
@@ -166,7 +195,7 @@ if [[ -z "$PROOT_DISTRO" ]]; then
       INSTALLED_DISTROS=($(proot-distro list | awk '/installed/ {print $1}'))
       NUM_INSTALLED=${#INSTALLED_DISTROS[@]}
       if [[ $NUM_INSTALLED -eq 1 ]]; then PROOT_DISTRO="${INSTALLED_DISTROS[0]}"; log "Auto-detected installed PRoot distribution: $PROOT_DISTRO";
-      elif [[ $NUM_INSTALLED -gt 1 ]]; then log "[ERROR] Multiple PRoot distributions installed: ${INSTALLED_DISTROS[*]}"; notify_error "Please specify which distribution to update using the --distro <name> option."; exit 1;
+      elif [[ $NUM_INSTALLED -gt 1 ]]; then log "[ERROR] Multiple PRoot distributions installed: ${INSTALLED_DISTROS[*]}"; SCRIPT_TRAP_EXIT_CODE=1; notify_error "Please specify which distribution to update using the --distro <name> option."; # Exits
       else log "No installed PRoot distributions found. PRoot-related updates will be skipped."; PROOT_DISTRO=""; fi
   fi
 else log "Using specified PRoot distribution: $PROOT_DISTRO"; fi
@@ -175,18 +204,22 @@ else log "Using specified PRoot distribution: $PROOT_DISTRO"; fi
 # === Preflight Checks ===
 log "\n=== Running Preflight Checks ==="
 log "Checking internet connectivity..."
-if ! curl -fsSL --connect-timeout 5 "$SCRIPT_URL" -o /dev/null; then notify_error "No internet connection or unable to reach script URL: $SCRIPT_URL"; fi
+if ! curl -fsSL --connect-timeout 5 "$SCRIPT_URL" -o /dev/null; then SCRIPT_TRAP_EXIT_CODE=1; notify_error "No internet connection or unable to reach script URL: $SCRIPT_URL"; fi
 log "Internet connection check passed."
 
 log "Checking disk space (required: ${REQUIRED_SPACE_MB}MB on partition for '$LOG_DIR')..."
-# df --output=avail gives size in 1K blocks.
-AVAILABLE_SPACE_KB=$(df --output=avail -k "$LOG_DIR" 2>/dev/null | awk 'NR==2 {print $1}')
+# Use a more portable df command: df -kP shows sizes in 1K blocks, $4 is usually 'Available'
+AVAILABLE_SPACE_KB=$(df -kP "$LOG_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+
 if [[ -z "$AVAILABLE_SPACE_KB" || ! "$AVAILABLE_SPACE_KB" =~ ^[0-9]+$ ]]; then
-  notify_error "Could not determine available disk space for '$LOG_DIR' or value is not a number."
+  # If df failed, AVAILABLE_SPACE_KB will likely be empty or non-numeric
+  SCRIPT_TRAP_EXIT_CODE=1; notify_error "Could not determine available disk space for '$LOG_DIR', or the value was non-numeric. df output field was: '$AVAILABLE_SPACE_KB'"
 else
   AVAILABLE_SPACE_MB=$((AVAILABLE_SPACE_KB / 1024))
-  if ((AVAILABLE_SPACE_MB < REQUIRED_SPACE_MB)); then notify_error "Low disk space: only ${AVAILABLE_SPACE_MB}MB available, but ${REQUIRED_SPACE_MB}MB is required for logs/temp files."; fi
-  log "Disk space check passed (${AVAILABLE_SPACE_MB}MB available for logs/temp files)."
+  if ((AVAILABLE_SPACE_MB < REQUIRED_SPACE_MB)); then
+    SCRIPT_TRAP_EXIT_CODE=1; notify_error "Low disk space: only ${AVAILABLE_SPACE_MB}MB available on the partition for '$LOG_DIR', but ${REQUIRED_SPACE_MB}MB is required."
+  fi
+  log "Disk space check passed (${AVAILABLE_SPACE_MB}MB available on the partition for '$LOG_DIR')."
 fi
 
 log "Checking Termux dependencies: ${DEFAULT_DEPENDENCIES[*]}"
@@ -201,21 +234,21 @@ for dep in "${DEFAULT_DEPENDENCIES[@]}"; do
   fi
 done
 if [[ "$HAS_MISSING_DEPS" == true ]]; then
-  notify_error "$MISSING_DEPS_MSG $MISSING_DEPS_LIST. Please install them manually in Termux (e.g., 'pkg install${MISSING_DEPS_LIST}')."
-  # For a non-rooted script, we must exit if core dependencies are missing.
-  exit 1
+  SCRIPT_TRAP_EXIT_CODE=1; notify_error "$MISSING_DEPS_MSG $MISSING_DEPS_LIST. Please install them manually in Termux (e.g., 'pkg install${MISSING_DEPS_LIST}')."
 else log "All required Termux dependencies are present."; fi
 
 
 # === Self-update with Hash Verification (Hardened Version) ===
 log "\n=== Checking for Script Updates ==="
 TEMP_SCRIPT=$(mktemp); TEMP_HASH_FILE="$TEMP_SCRIPT.sha256"
-# Trap handled by main trap now
+TEMP_FILES_TO_CLEAN+=("$TEMP_SCRIPT" "$TEMP_HASH_FILE") # Add to global cleanup
+
 EXPECTED_HASH=""; log "Fetching expected hash from $EXPECTED_HASH_URL"
 if curl -fsSL --retry 3 --connect-timeout 15 "$EXPECTED_HASH_URL" -o "$TEMP_HASH_FILE"; then
   EXPECTED_HASH=$(awk '{print $1}' "$TEMP_HASH_FILE" | head -n 1)
   if [[ -z "$EXPECTED_HASH" ]]; then log "Warning: Hash file '$TEMP_HASH_FILE' is empty or invalid. Skipping hash check."; else log "Expected hash fetched: $EXPECTED_HASH"; fi
 else log "Warning: Failed to fetch hash from $EXPECTED_HASH_URL. Skipping hash check."; fi
+
 log "Fetching remote script from $SCRIPT_URL"
 if curl -fsSL --retry 3 --connect-timeout 30 "$SCRIPT_URL" -o "$TEMP_SCRIPT"; then
   if ! cmp -s "$TEMP_SCRIPT" "$SCRIPT_FILE"; then
@@ -224,27 +257,38 @@ if curl -fsSL --retry 3 --connect-timeout 30 "$SCRIPT_URL" -o "$TEMP_SCRIPT"; th
       DOWNLOADED_HASH=""
       if command -v sha256sum &>/dev/null; then DOWNLOADED_HASH=$(sha256sum "$TEMP_SCRIPT" | awk '{print $1}');
       elif command -v shasum &>/dev/null; then DOWNLOADED_HASH=$(shasum -a 256 "$TEMP_SCRIPT" | awk '{print $1}');
-      else notify_error "No SHA256 tool (sha256sum or shasum from coreutils) found! Cannot verify script integrity."; exit 1; fi
+      else SCRIPT_TRAP_EXIT_CODE=1; notify_error "No SHA256 tool (sha256sum or shasum from coreutils) found! Cannot verify script integrity."; fi
       log "Downloaded script hash: $DOWNLOADED_HASH"
-      if [[ "$DOWNLOADED_HASH" != "$EXPECTED_HASH" ]]; then FORCE=false notify_error "Hash mismatch! Expected '$EXPECTED_HASH', got '$DOWNLOADED_HASH'. Aborting update."; exit 1; fi
+      if [[ "$DOWNLOADED_HASH" != "$EXPECTED_HASH" ]]; then FORCE=false; SCRIPT_TRAP_EXIT_CODE=1; notify_error "Hash mismatch! Expected '$EXPECTED_HASH', got '$DOWNLOADED_HASH'. Aborting update."; fi
       log "Hash verification successful."; VERIFIED=true
     else
       log "Skipping hash verification (expected hash unavailable)."
-      if [[ "${FORCE:-false}" != true ]]; then notify_error "Cannot verify script integrity (hash unavailable) and --force not used. Aborting update."; exit 1; fi
+      if [[ "${FORCE:-false}" != true ]]; then SCRIPT_TRAP_EXIT_CODE=1; notify_error "Cannot verify script integrity (hash unavailable) and --force not used. Aborting update."; fi
       log "Proceeding without hash verification due to --force flag."; VERIFIED=true
     fi
     if [[ "$VERIFIED" == true ]]; then
       if grep -q "^#!/bin/bash" "$TEMP_SCRIPT"; then
         log "Shebang validation passed."; log "Replacing current script at $SCRIPT_FILE"
-        # No sudo needed for cp/chmod if script is in user's home directory
         cp "$TEMP_SCRIPT" "$SCRIPT_FILE" && chmod +x "$SCRIPT_FILE"
-        log "Script updated successfully. Re-running..."; exec "$SCRIPT_FILE" "$@"
-      else notify_error "Downloaded script failed validation (missing shebang). Aborting update."; exit 1; fi
+        if [[ $? -eq 0 ]]; then
+            log "Script updated successfully. Re-running...";
+            # Clean up *before* exec, and remove trap for current process
+            rm -f "$TEMP_SCRIPT" "$TEMP_HASH_FILE"
+            trap - EXIT SIGINT SIGTERM
+            exec "$SCRIPT_FILE" "$@"
+        else
+            SCRIPT_TRAP_EXIT_CODE=1; notify_error "Failed to copy updated script to $SCRIPT_FILE."
+        fi
+      else SCRIPT_TRAP_EXIT_CODE=1; notify_error "Downloaded script failed validation (missing shebang). Aborting update."; fi
     fi
   else log "Script is already up to date."; fi
-else notify_error "Failed to fetch script from $SCRIPT_URL. Check URL or connection."; # Exits if --force not used
+else SCRIPT_TRAP_EXIT_CODE=1; notify_error "Failed to fetch script from $SCRIPT_URL. Check URL or connection."; 
 fi
-# Cleanup for self-update temp files is done by main trap if script doesn't exec
+# If we didn't exec, remove temp files (trap will also try, but good to do it here)
+rm -f "$TEMP_SCRIPT" "$TEMP_HASH_FILE"
+# Remove from array if successfully cleaned
+TEMP_FILES_TO_CLEAN=()
+
 
 # === Log Rotation ===
 log "\n=== Checking for Log Rotation (Retention: $RETENTION_DAYS days) ==="
@@ -262,8 +306,6 @@ if [[ -n "$PROOT_DISTRO" ]]; then
     log "\n=== Task: PRoot Distro Filesystem Check ($PROOT_DISTRO) ==="
     if ! command -v proot-distro &> /dev/null; then log "[Skipped] 'proot-distro' command (Termux) not found."; elif proot-distro list | grep -q "^${PROOT_DISTRO}[[:space:]]"; then
       log "Running 'proot-distro upgrade $PROOT_DISTRO' (non-root, may have limited effect)..."
-      # This command might perform some filesystem checks or minor updates without root.
-      # Its main role with root is more significant.
       if ! retry proot-distro upgrade "$PROOT_DISTRO"; then log "[Warning] 'proot-distro upgrade $PROOT_DISTRO' encountered an issue. Continuing..."; else log "'proot-distro upgrade $PROOT_DISTRO' completed."; fi
     else notify_error "Specified PRoot distro '$PROOT_DISTRO' not found installed." || ((UPDATE_ERRORS++)); fi
 else log "\n=== Task: PRoot Distro Filesystem Check [Skipped] (No distro specified) ==="; fi
@@ -271,14 +313,18 @@ else log "\n=== Task: PRoot Distro Filesystem Check [Skipped] (No distro specifi
 # --- PRoot Guest OS Package Update Task ---
 if [[ -n "$PROOT_DISTRO" && $UPDATE_ERRORS -eq 0 ]]; then
     log "\n=== Task: PRoot Guest OS Package Update (inside $PROOT_DISTRO) ==="
+    # Note: `sudo` inside the proot is fine if your proot user has sudo rights *within that guest environment*,
+    # or if the default proot user (often root) doesn't strictly need sudo for apt.
+    # For wide compatibility, keeping sudo. User can remove if their proot user is root.
     read -r -d '' GUEST_OS_UPDATE_CMDS <<EOF
 set -euo pipefail
 echo "[INFO] Updating package lists inside $PROOT_DISTRO..."
-sudo apt update -y
+if command -v sudo &> /dev/null; then SUDO_CMD="sudo"; else SUDO_CMD=""; fi
+\$SUDO_CMD apt update -y
 echo "[INFO] Upgrading packages inside $PROOT_DISTRO..."
-sudo apt full-upgrade -y
+\$SUDO_CMD apt full-upgrade -y
 echo "[INFO] Removing unused packages inside $PROOT_DISTRO..."
-sudo apt autoremove -y
+\$SUDO_CMD apt autoremove -y
 echo "[INFO] PRoot Guest OS package update sequence completed."
 EOF
     log "Executing Guest OS package updates inside $PROOT_DISTRO..."
@@ -289,49 +335,48 @@ else
     if [[ -n "$PROOT_DISTRO" ]]; then log "\n=== Task: PRoot Guest OS Package Update [Skipped due to previous errors or missing distro] ==="; fi
 fi
 
-
 # --- Git Repository Update Task (inside PRoot Distro) ---
 if [[ -n "$PROOT_DISTRO" && $UPDATE_ERRORS -eq 0 ]]; then
     log "\n=== Task: Git Repository Update (inside $PROOT_DISTRO: $REPO_DIR) ==="
-    # REPO_DIR is path *inside* the PRoot environment
     read -r -d '' GIT_PULL_COMMAND <<EOF
 set -euo pipefail
-if [ ! -d "$REPO_DIR" ]; then
-    echo "[ERROR] Repository directory '$REPO_DIR' does not exist inside $PROOT_DISTRO."
-    exit 1
+# Expand ~ to user's home directory inside proot if REPO_DIR starts with ~/
+actual_repo_dir="\$HOME/\${REPO_DIR#\~\/}"
+if [[ "\$REPO_DIR" != "~/"* ]]; then # If it doesn't start with ~/, use as is
+    actual_repo_dir="\$REPO_DIR"
 fi
-if [ ! -d "$REPO_DIR/.git" ]; then
-    echo "[ERROR] No git repository found at '$REPO_DIR' inside $PROOT_DISTRO."
-    exit 1
-fi
-echo "[INFO] Changing to $REPO_DIR and pulling from $GIT_REMOTE $GIT_BRANCH..."
-cd "$REPO_DIR"
+echo "[INFO] Target Git repository path inside PRoot: \$actual_repo_dir"
+if [ ! -d "\$actual_repo_dir" ]; then echo "[ERROR] Repository directory '\$actual_repo_dir' does not exist inside $PROOT_DISTRO."; exit 1; fi
+if [ ! -d "\$actual_repo_dir/.git" ]; then echo "[ERROR] No git repository found at '\$actual_repo_dir' inside $PROOT_DISTRO."; exit 1; fi
+echo "[INFO] Changing to \$actual_repo_dir and pulling from $GIT_REMOTE $GIT_BRANCH..."
+cd "\$actual_repo_dir"
 git pull "$GIT_REMOTE" "$GIT_BRANCH"
-echo "[INFO] Git pull complete for $REPO_DIR. Current status (short):"
-git status -s
+echo "[INFO] Git pull complete for \$actual_repo_dir. Current status (short):"; git status -s
 EOF
     log "Executing Git pull inside $PROOT_DISTRO for repository $REPO_DIR..."
-    if ! proot-distro login "$PROOT_DISTRO" --bind /dev/null:/dev/random -- bash -c "$GIT_PULL_COMMAND" 2>&1 | tee -a "$LOGFILE"; then # Added /dev/random bind for git
+    # Bind /dev/urandom for git operations that might need entropy
+    if ! proot-distro login "$PROOT_DISTRO" --bind /dev/urandom:/dev/random --bash -c "$GIT_PULL_COMMAND" 2>&1 | tee -a "$LOGFILE"; then
         notify_error "Git pull failed in $PROOT_DISTRO at $REPO_DIR. Check log." || ((UPDATE_ERRORS++))
     else log "Git repository update in $PROOT_DISTRO at $REPO_DIR successful."; fi
 else
     if [[ -n "$PROOT_DISTRO" ]]; then log "\n=== Task: Git Repository Update [Skipped due to previous errors or missing distro] ==="; fi
 fi
 
-
 # --- Python Virtual Environment Update Task (inside PRoot Distro) ---
 if [[ -n "$PROOT_DISTRO" && $UPDATE_ERRORS -eq 0 ]]; then
     log "\n=== Task: Python Virtualenv Update (inside $PROOT_DISTRO: $VENV_DIR) ==="
-    # Assume VENV_DIR is relative to the proot user's home or an absolute path inside proot.
-    # Common locations are /root/VENV_DIR or /home/user/VENV_DIR.
-    # For simplicity, assuming it's accessible as /root/$VENV_DIR if proot user is root-like. Adjust if your proot user is different.
-    VENV_PATH_INSIDE_PROOT="/root/$VENV_DIR" 
-    log "Targeting venv at $VENV_PATH_INSIDE_PROOT within $PROOT_DISTRO."
-
+    # VENV_DIR is the name of the venv dir, usually inside the user's home in proot
+    # Let's assume user's home dir is /root or $HOME if not root (e.g. /home/user)
     read -r -d '' PY_UPDATE_COMMANDS <<EOF
 export PATH="\$HOME/.local/bin:\$PATH" 
 set -euo pipefail
-VENV_PATH_INSIDE_PROOT="$VENV_PATH_INSIDE_PROOT" 
+# Construct VENV_PATH based on whether VENV_DIR is absolute or relative
+if [[ "$VENV_DIR" == /* ]]; then # Absolute path
+    VENV_PATH_INSIDE_PROOT="$VENV_DIR"
+else # Relative to home
+    VENV_PATH_INSIDE_PROOT="\$HOME/$VENV_DIR"
+fi
+echo "[INFO] Target Python virtualenv path inside PRoot: \$VENV_PATH_INSIDE_PROOT"
 VENV_ACTIVATE="\$VENV_PATH_INSIDE_PROOT/bin/activate"
 echo "[INFO] Checking for virtual environment at \$VENV_PATH_INSIDE_PROOT..."
 if [ ! -f "\$VENV_ACTIVATE" ]; then echo "[ERROR] Virtualenv activation script not found: \$VENV_ACTIVATE." >&2; exit 1; fi
@@ -339,9 +384,7 @@ echo "[INFO] Activating virtualenv: \$VENV_PATH_INSIDE_PROOT"; source "\$VENV_AC
 echo "[INFO] Upgrading pip, setuptools, wheel in \$VENV_PATH_INSIDE_PROOT..."
 if ! pip install --no-cache-dir --upgrade pip setuptools wheel; then echo "[ERROR] Failed to upgrade pip/setuptools/wheel." >&2; exit 1; fi
 echo "[INFO] Checking for outdated packages in \$VENV_PATH_INSIDE_PROOT..."
-# Capture outdated packages, ensuring the command itself doesn't fail the script if no outdated packages are found (pip list --outdated exits 0)
 outdated_packages=\$(pip list --outdated --format=freeze 2>/dev/null | cut -d '=' -f1 | tr '\n' ' ')
-# Trim whitespace
 outdated_packages=\$(echo \$outdated_packages | xargs) 
 if [ -n "\$outdated_packages" ]; then
     echo "[INFO] Found outdated packages: \$outdated_packages"; echo "[INFO] Attempting to upgrade..."
@@ -352,13 +395,12 @@ echo "[INFO] Python virtualenv update in \$VENV_PATH_INSIDE_PROOT completed succ
 exit 0 
 EOF
     log "Executing Python virtualenv updates inside $PROOT_DISTRO..."
-    if ! proot-distro login "$PROOT_DISTRO" -- bash -c "$PY_UPDATE_COMMANDS" 2>&1 | tee -a "$LOGFILE"; then
-        notify_error "Python virtualenv update within $PROOT_DISTRO failed. Check log." || ((UPDATE_ERRORS++))
-    else log "Python virtualenv update within $PROOT_DISTRO completed successfully."; fi
+    if ! proot-distro login "$PROOT_DISTRO" --bash -c "$PY_UPDATE_COMMANDS" 2>&1 | tee -a "$LOGFILE"; then
+        notify_error "Python virtualenv update within $PROOT_DISTRO for $VENV_DIR failed. Check log." || ((UPDATE_ERRORS++))
+    else log "Python virtualenv update within $PROOT_DISTRO for $VENV_DIR completed successfully."; fi
 else
     if [[ -n "$PROOT_DISTRO" ]]; then log "\n=== Task: Python Virtualenv Update [Skipped due to previous errors or missing distro] ==="; fi
 fi
-
 
 # === Summary ===
 log "\n=== Update Script Summary ==="
@@ -370,6 +412,6 @@ else
   log "[SUCCESS] $final_message"; send_notification "[Update Success] $final_message on $(hostname)"
 fi
 log "\n=== Full Update Script Finished for NON-ROOTED device: $(date) ==="
-# Cleanup main trap before exiting
-trap - EXIT SIGINT SIGTERM
+SCRIPT_TRAP_EXIT_CODE=0 # Indicate normal exit
+trap - EXIT SIGINT SIGTERM # Cleanly remove trap for normal exit
 exit $UPDATE_ERRORS
