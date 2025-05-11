@@ -303,11 +303,26 @@ UPDATE_ERRORS=0
 # --- PRoot Distro Filesystem Check/Update (Non-Root) ---
 if [[ -n "$PROOT_DISTRO" ]]; then
     log "\n=== Task: PRoot Distro Filesystem Check ($PROOT_DISTRO) ==="
-    if ! command -v proot-distro &> /dev/null; then log "[Skipped] 'proot-distro' command (Termux) not found."; elif proot-distro list | grep -q "^${PROOT_DISTRO}[[:space:]]"; then
-      log "Running 'proot-distro upgrade $PROOT_DISTRO' (non-root, may have limited effect)..."
-      if ! retry proot-distro upgrade "$PROOT_DISTRO"; then log "[Warning] 'proot-distro upgrade $PROOT_DISTRO' encountered an issue. Continuing..."; else log "'proot-distro upgrade $PROOT_DISTRO' completed."; fi
-    else notify_error "Specified PRoot distro '$PROOT_DISTRO' not found installed." || ((UPDATE_ERRORS++)); fi
-else log "\n=== Task: PRoot Distro Filesystem Check [Skipped] (No distro specified) ==="; fi
+    if ! command -v proot-distro &> /dev/null; then 
+        log "[Skipped] 'proot-distro' command (Termux) not found."
+    # MODIFIED LINE BELOW
+    elif proot-distro list | grep -qw "$PROOT_DISTRO"; then # Check if PROOT_DISTRO is listed as an installed distro
+      log "Verified PRoot distro '$PROOT_DISTRO' is installed." # Added confirmation
+      log "Running 'proot-distro upgrade $PROOT_DISTRO' (non-root, may have limited effect on OS packages)..."
+      # This command might perform some filesystem checks or minor updates without root.
+      if ! retry proot-distro upgrade "$PROOT_DISTRO"; then 
+          log "[Warning] 'proot-distro upgrade $PROOT_DISTRO' encountered an issue. This is sometimes normal on non-rooted devices. Continuing to update packages inside the guest OS."
+      else 
+          log "'proot-distro upgrade $PROOT_DISTRO' completed."
+      fi
+    else 
+      # This means proot-distro is installed, but the specified PROOT_DISTRO is not in its list of installed distros.
+      # The output of "proot-distro list" (which might be help text or an empty list) might have been tee'd to the log just before this.
+      notify_error "Specified PRoot distro '$PROOT_DISTRO' not found in the list of installed distros. Please install it first (e.g., 'proot-distro install $PROOT_DISTRO')." || ((UPDATE_ERRORS++))
+    fi
+else 
+    log "\n=== Task: PRoot Distro Filesystem Check [Skipped] (No distro specified) ==="
+fi
 
 # --- PRoot Guest OS Package Update Task ---
 if [[ -n "$PROOT_DISTRO" && $UPDATE_ERRORS -eq 0 ]]; then
