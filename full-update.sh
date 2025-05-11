@@ -1,0 +1,375 @@
+#!/bin/bash
+set -euo pipefail # Exit on error, unset variable, pipe failure
+
+# === Default Configuration ===
+DEFAULT_LOG_DIR="logs"
+DEFAULT_RETENTION_DAYS=7
+DEFAULT_VENV_DIR="myenv" # Default for your "myenv"
+DEFAULT_SCRIPT_URL="https://raw.githubusercontent.com/Dhruvpalsinghbose/update-scripts/main/full-update.sh" # CHANGE THIS if you host it elsewhere
+DEFAULT_REPO_DIR="~/myproject" # EXAMPLE: Path inside PRoot, adjust as needed
+DEFAULT_DEPENDENCIES=("git" "python3" "python3-pip" "python3-venv" "curl" "proot-distro" "awk" "tee" "grep" "df" "find" "date" "realpath" "cmp" "coreutils" "jq") # coreutils for sha256sum
+DEFAULT_EXPECTED_HASH_URL="https://raw.githubusercontent.com/Dhruvpalsinghbose/update-scripts/main/full-update.sh.sha256" # CHANGE THIS if you host it elsewhere
+DEFAULT_REQUIRED_SPACE_MB=500
+DEFAULT_GIT_REMOTE="origin"
+DEFAULT_GIT_BRANCH="main"
+DEFAULT_MAX_RETRIES=3
+DEFAULT_INITIAL_RETRY_DELAY=5 # seconds
+MAX_TOTAL_WAIT_TIME=300 # Max total seconds for retries
+
+# === Script Variables (will be set from defaults or args) ===
+LOG_DIR="$DEFAULT_LOG_DIR"
+RETENTION_DAYS="$DEFAULT_RETENTION_DAYS"
+VENV_DIR="$DEFAULT_VENV_DIR"
+SCRIPT_URL="$DEFAULT_SCRIPT_URL"
+REPO_DIR="$DEFAULT_REPO_DIR"
+EXPECTED_HASH_URL="$DEFAULT_EXPECTED_HASH_URL"
+REQUIRED_SPACE_MB="$DEFAULT_REQUIRED_SPACE_MB"
+GIT_REMOTE="$DEFAULT_GIT_REMOTE"
+GIT_BRANCH="$DEFAULT_GIT_BRANCH"
+MAX_RETRIES="$DEFAULT_MAX_RETRIES"
+INITIAL_RETRY_DELAY="$DEFAULT_INITIAL_RETRY_DELAY"
+
+FORCE=false
+NOTIFY=false
+PROOT_DISTRO=""
+PROOT_DISTRO_SPECIFIED_VIA_ARG=false
+
+SCRIPT_FILE="$(realpath "$0")"
+SCRIPT_NAME="$(basename "$0")"
+LOGFILE="" # Will be set after LOG_DIR is confirmed
+
+# === Function Definitions ===
+usage() {
+  echo "Usage: $SCRIPT_NAME [options]"
+  echo ""
+  echo "Performs updates within a PRoot distro (e.g., Ubuntu) on a NON-ROOTED device."
+  echo "Focuses on PRoot guest OS packages, Git repositories, and Python virtual environments."
+  echo "Host (Termux) package management is NOT handled by this script."
+  echo ""
+  echo "Options:"
+  echo "  -f, --force             Continue script execution even if non-critical errors occur."
+  echo "  -n, --notify            Enable Telegram notifications (requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars)."
+  echo "  -d, --distro DISTRO     Specify the PRoot distro to update (e.g., ubuntu). If not set, attempts auto-detection."
+  echo "      --repo-dir PATH     Path to the Git repository (inside the PRoot distro) to update (Default: \"$DEFAULT_REPO_DIR\")."
+  echo "      --venv-dir NAME     Name of the Python venv directory inside the PRoot user's home (Default: \"$DEFAULT_VENV_DIR\")."
+  echo "      --git-remote REMOTE Git remote to pull from (Default: \"$DEFAULT_GIT_REMOTE\")."
+  echo "      --git-branch BRANCH Git branch to pull (Default: \"$DEFAULT_GIT_BRANCH\")."
+  echo "      --log-dir PATH      Directory to store log files (Default: \"$DEFAULT_LOG_DIR\")."
+  echo "  -h, --help              Display this help message and exit."
+  echo ""
+  echo "IMPORTANT: This script is for NON-ROOTED devices. Ensure all Termux dependencies"
+  echo "           (${DEFAULT_DEPENDENCIES[*]}) are installed manually using 'pkg install <package>'."
+  echo ""
+  echo "Example (Focus on Ubuntu PRoot):"
+  echo "  $SCRIPT_NAME --distro ubuntu --repo-dir /root/myproject --venv-dir myenv --notify"
+  exit 0
+}
+
+log() { echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOGFILE"; }
+
+notify_error() {
+  local error_message="[ERROR] $1"
+  log "$error_message"
+  send_notification "[Update Error] $1 on $(hostname)"
+  if [[ "$FORCE" != true ]]; then log "Exiting due to error (--force not used)."; exit 1; else log "Continuing execution due to --force flag."; return 1; fi
+}
+
+send_notification() {
+  if [[ "$NOTIFY" == true && -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+    local text_to_send="$1"
+    local encoded_text
+    if command -v jq &>/dev/null; then
+        encoded_text=$(printf '%s' "$text_to_send" | jq -s -R -r @uri)
+    else
+        # Basic URL encoding fallback (may not cover all special characters as well as jq)
+        encoded_text=$(printf %s "$text_to_send" | awk 'BEGIN{while(getline l){gsub(/%/, "%25", l); gsub(/ /, "%20", l); gsub(/#/, "%23", l); gsub(/\$/, "%24", l); gsub(/&/, "%26", l); gsub(/\+/, "%2B", l); gsub(/,/, "%2C", l); gsub(/\//, "%2F", l); gsub(/:/, "%3A", l); gsub(/;/, "%3B", l); gsub(/=/, "%3D", l); gsub(/\?/, "%3F", l); gsub(/@/, "%40", l); gsub(/</, "%3C", l); gsub(/>/, "%3E", l); gsub(/\[/, "%5B", l); gsub(/\]/, "%5D", l); gsub(/\\/, "%5C", l); gsub(/\^/, "%5E", l); gsub(/`/, "%60", l); gsub(/{/, "%7B", l); gsub(/\|/, "%7C", l); gsub(/}/, "%7D", l); gsub(/~/, "%7E", l); print l}}')
+        log "Warning: jq not found for robust URL encoding of Telegram message. Using basic fallback."
+    fi
+
+    local api_url="https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage"
+    local payload="chat_id=$TELEGRAM_CHAT_ID&text=$encoded_text&parse_mode=Markdown"
+
+    response=$(curl -sS -w "\n%{http_code}" -X POST "$api_url" -d "$payload" --connect-timeout 10 --max-time 15) || {
+      log "[ERROR] curl command failed to connect to Telegram API."; return 1;
+    }
+    http_code=$(echo "$response" | tail -n1); http_body=$(echo "$response" | sed '$ d')
+    if [[ "$http_code" -ne 200 ]]; then log "[ERROR] Failed to send Telegram notification. HTTP Code: $http_code. Response: $http_body"; return 1; fi
+    log "Telegram notification sent successfully."
+  elif [[ "$NOTIFY" == true ]]; then log "Warning: Telegram notification requested (--notify) but TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID env vars are not set or empty."; return 1; fi
+  return 0
+}
+
+retry() {
+  local n=0; local delay=$INITIAL_RETRY_DELAY; local command_to_run=("$@"); local exit_code=0; local total_wait=0
+  log "Attempting command: ${command_to_run[*]}"
+  until "${command_to_run[@]}"; do
+    exit_code=$?; ((n++)); total_wait=$((total_wait + delay))
+    if ((n >= MAX_RETRIES || total_wait >= MAX_TOTAL_WAIT_TIME)); then log "[ERROR] Command failed after $n attempts and $total_wait seconds with exit code $exit_code: ${command_to_run[*]}"; return $exit_code; fi
+    local jitter_ms=$((RANDOM % 1000)); local jitter_sec; jitter_sec=$(awk "BEGIN {print $jitter_ms/1000}")
+    log "Command failed with exit code $exit_code. Retrying attempt $(($n + 1))/$MAX_RETRIES in $delay sec + $jitter_sec sec jitter (total wait: $total_wait sec)..."
+    sleep "$delay"; sleep "$jitter_sec"; delay=$((delay * 2))
+  done
+  log "Command succeeded: ${command_to_run[*]}"; return 0
+}
+
+# === Argument Parsing ===
+# (Using refined parsing from user's later paste for handling --option=value and --option value)
+while [[ $# -gt 0 ]]; do
+  key="$1"
+  case $key in
+    -f|--force) FORCE=true; shift ;;
+    -n|--notify) NOTIFY=true; shift ;;
+    -d=*|--distro=*) PROOT_DISTRO="${key#*=}"; PROOT_DISTRO_SPECIFIED_VIA_ARG=true; shift ;;
+    -d|--distro) PROOT_DISTRO="$2"; PROOT_DISTRO_SPECIFIED_VIA_ARG=true; shift; shift ;;
+    --repo-dir=*) REPO_DIR="${key#*=}"; shift ;;
+    --repo-dir) REPO_DIR="$2"; shift; shift ;;
+    --venv-dir=*) VENV_DIR="${key#*=}"; shift ;;
+    --venv-dir) VENV_DIR="$2"; shift; shift ;;
+    --git-remote=*) GIT_REMOTE="${key#*=}"; shift ;;
+    --git-remote) GIT_REMOTE="$2"; shift; shift ;;
+    --git-branch=*) GIT_BRANCH="${key#*=}"; shift ;;
+    --git-branch) GIT_BRANCH="$2"; shift; shift ;;
+    --log-dir=*) LOG_DIR="${key#*=}"; shift ;;
+    --log-dir) LOG_DIR="$2"; shift; shift ;;
+    --retention=*) RETENTION_DAYS="${key#*=}"; shift ;; # Validation moved after loop
+    --retention) RETENTION_DAYS="$2"; shift; shift ;; # Validation moved after loop
+    --req-space=*) REQUIRED_SPACE_MB="${key#*=}"; shift ;; # Validation moved after loop
+    --req-space) REQUIRED_SPACE_MB="$2"; shift; shift ;; # Validation moved after loop
+    -h|--help) usage ;;
+    *) echo "[ERROR] Unknown option: $1" >&2; usage ;;
+  esac
+done
+
+# Validate numeric options that were parsed
+if ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then echo "[ERROR] --retention value '$RETENTION_DAYS' is not a valid number." >&2; usage; fi
+if ! [[ "$REQUIRED_SPACE_MB" =~ ^[0-9]+$ ]]; then echo "[ERROR] --req-space value '$REQUIRED_SPACE_MB' is not a valid number." >&2; usage; fi
+
+
+# === Setup Logging ===
+mkdir -p "$LOG_DIR"
+LOGFILE="$LOG_DIR/update_$(date '+%Y-%m-%d_%H-%M-%S').log"
+trap 'echo "[ERROR] Script interrupted." | tee -a "$LOGFILE"; exit 1' EXIT SIGINT SIGTERM
+
+# === Initial Log Messages ===
+log "=== Starting Update Script ($SCRIPT_NAME) for NON-ROOTED device ==="
+log "Run options: FORCE=$FORCE, NOTIFY=$NOTIFY, PROOT_DISTRO='$PROOT_DISTRO' (Specified: $PROOT_DISTRO_SPECIFIED_VIA_ARG)"
+log "Config: REPO_DIR='$REPO_DIR', VENV_DIR='$VENV_DIR', GIT_REMOTE='$GIT_REMOTE', GIT_BRANCH='$GIT_BRANCH'"
+
+
+# === Detect Distro If Not Set ===
+if [[ -z "$PROOT_DISTRO" ]]; then
+  log "No PRoot distribution specified via --distro. Attempting auto-detection..."
+  if ! command -v proot-distro &> /dev/null; then
+      log "[WARNING] 'proot-distro' command not found. Cannot auto-detect or manage PRoot distributions. PRoot steps will be skipped."
+      PROOT_DISTRO="" 
+  else
+      INSTALLED_DISTROS=($(proot-distro list | awk '/installed/ {print $1}'))
+      NUM_INSTALLED=${#INSTALLED_DISTROS[@]}
+      if [[ $NUM_INSTALLED -eq 1 ]]; then PROOT_DISTRO="${INSTALLED_DISTROS[0]}"; log "Auto-detected installed PRoot distribution: $PROOT_DISTRO";
+      elif [[ $NUM_INSTALLED -gt 1 ]]; then log "[ERROR] Multiple PRoot distributions installed: ${INSTALLED_DISTROS[*]}"; notify_error "Please specify which distribution to update using the --distro <name> option."; exit 1;
+      else log "No installed PRoot distributions found. PRoot-related updates will be skipped."; PROOT_DISTRO=""; fi
+  fi
+else log "Using specified PRoot distribution: $PROOT_DISTRO"; fi
+
+
+# === Preflight Checks ===
+log "\n=== Running Preflight Checks ==="
+log "Checking internet connectivity..."
+if ! curl -fsSL --connect-timeout 5 "$SCRIPT_URL" -o /dev/null; then notify_error "No internet connection or unable to reach script URL: $SCRIPT_URL"; fi
+log "Internet connection check passed."
+
+log "Checking disk space (required: ${REQUIRED_SPACE_MB}MB on partition for '$LOG_DIR')..."
+# df --output=avail gives size in 1K blocks.
+AVAILABLE_SPACE_KB=$(df --output=avail -k "$LOG_DIR" 2>/dev/null | awk 'NR==2 {print $1}')
+if [[ -z "$AVAILABLE_SPACE_KB" || ! "$AVAILABLE_SPACE_KB" =~ ^[0-9]+$ ]]; then
+  notify_error "Could not determine available disk space for '$LOG_DIR' or value is not a number."
+else
+  AVAILABLE_SPACE_MB=$((AVAILABLE_SPACE_KB / 1024))
+  if ((AVAILABLE_SPACE_MB < REQUIRED_SPACE_MB)); then notify_error "Low disk space: only ${AVAILABLE_SPACE_MB}MB available, but ${REQUIRED_SPACE_MB}MB is required for logs/temp files."; fi
+  log "Disk space check passed (${AVAILABLE_SPACE_MB}MB available for logs/temp files)."
+fi
+
+log "Checking Termux dependencies: ${DEFAULT_DEPENDENCIES[*]}"
+MISSING_DEPS_MSG="The following Termux dependencies are missing:"
+MISSING_DEPS_LIST=""
+HAS_MISSING_DEPS=false
+for dep in "${DEFAULT_DEPENDENCIES[@]}"; do
+  if ! command -v "$dep" &>/dev/null; then
+    log "[Warning] Termux Dependency '$dep' is missing."
+    MISSING_DEPS_LIST+=" $dep"
+    HAS_MISSING_DEPS=true
+  fi
+done
+if [[ "$HAS_MISSING_DEPS" == true ]]; then
+  notify_error "$MISSING_DEPS_MSG $MISSING_DEPS_LIST. Please install them manually in Termux (e.g., 'pkg install${MISSING_DEPS_LIST}')."
+  # For a non-rooted script, we must exit if core dependencies are missing.
+  exit 1
+else log "All required Termux dependencies are present."; fi
+
+
+# === Self-update with Hash Verification (Hardened Version) ===
+log "\n=== Checking for Script Updates ==="
+TEMP_SCRIPT=$(mktemp); TEMP_HASH_FILE="$TEMP_SCRIPT.sha256"
+# Trap handled by main trap now
+EXPECTED_HASH=""; log "Fetching expected hash from $EXPECTED_HASH_URL"
+if curl -fsSL --retry 3 --connect-timeout 15 "$EXPECTED_HASH_URL" -o "$TEMP_HASH_FILE"; then
+  EXPECTED_HASH=$(awk '{print $1}' "$TEMP_HASH_FILE" | head -n 1)
+  if [[ -z "$EXPECTED_HASH" ]]; then log "Warning: Hash file '$TEMP_HASH_FILE' is empty or invalid. Skipping hash check."; else log "Expected hash fetched: $EXPECTED_HASH"; fi
+else log "Warning: Failed to fetch hash from $EXPECTED_HASH_URL. Skipping hash check."; fi
+log "Fetching remote script from $SCRIPT_URL"
+if curl -fsSL --retry 3 --connect-timeout 30 "$SCRIPT_URL" -o "$TEMP_SCRIPT"; then
+  if ! cmp -s "$TEMP_SCRIPT" "$SCRIPT_FILE"; then
+    log "New script version found. Verifying integrity..."; VERIFIED=false
+    if [[ -n "$EXPECTED_HASH" ]]; then
+      DOWNLOADED_HASH=""
+      if command -v sha256sum &>/dev/null; then DOWNLOADED_HASH=$(sha256sum "$TEMP_SCRIPT" | awk '{print $1}');
+      elif command -v shasum &>/dev/null; then DOWNLOADED_HASH=$(shasum -a 256 "$TEMP_SCRIPT" | awk '{print $1}');
+      else notify_error "No SHA256 tool (sha256sum or shasum from coreutils) found! Cannot verify script integrity."; exit 1; fi
+      log "Downloaded script hash: $DOWNLOADED_HASH"
+      if [[ "$DOWNLOADED_HASH" != "$EXPECTED_HASH" ]]; then FORCE=false notify_error "Hash mismatch! Expected '$EXPECTED_HASH', got '$DOWNLOADED_HASH'. Aborting update."; exit 1; fi
+      log "Hash verification successful."; VERIFIED=true
+    else
+      log "Skipping hash verification (expected hash unavailable)."
+      if [[ "${FORCE:-false}" != true ]]; then notify_error "Cannot verify script integrity (hash unavailable) and --force not used. Aborting update."; exit 1; fi
+      log "Proceeding without hash verification due to --force flag."; VERIFIED=true
+    fi
+    if [[ "$VERIFIED" == true ]]; then
+      if grep -q "^#!/bin/bash" "$TEMP_SCRIPT"; then
+        log "Shebang validation passed."; log "Replacing current script at $SCRIPT_FILE"
+        # No sudo needed for cp/chmod if script is in user's home directory
+        cp "$TEMP_SCRIPT" "$SCRIPT_FILE" && chmod +x "$SCRIPT_FILE"
+        log "Script updated successfully. Re-running..."; exec "$SCRIPT_FILE" "$@"
+      else notify_error "Downloaded script failed validation (missing shebang). Aborting update."; exit 1; fi
+    fi
+  else log "Script is already up to date."; fi
+else notify_error "Failed to fetch script from $SCRIPT_URL. Check URL or connection."; # Exits if --force not used
+fi
+# Cleanup for self-update temp files is done by main trap if script doesn't exec
+
+# === Log Rotation ===
+log "\n=== Checking for Log Rotation (Retention: $RETENTION_DAYS days) ==="
+log "Finding logs in '$LOG_DIR' older than $RETENTION_DAYS days..."
+find "$LOG_DIR" -type f -name "update_*.log" -mtime "+$((RETENTION_DAYS - 1))" -print -exec rm {} \; 2>&1 | tee -a "$LOGFILE" || log "[Warning] Log rotation command encountered an issue."
+log "Log rotation check complete."
+
+
+# === Main Update Process ===
+log "\n=== Starting Main Update Tasks for PRoot Distro: $(date) ==="
+UPDATE_ERRORS=0 
+
+# --- PRoot Distro Filesystem Check/Update (Non-Root) ---
+if [[ -n "$PROOT_DISTRO" ]]; then
+    log "\n=== Task: PRoot Distro Filesystem Check ($PROOT_DISTRO) ==="
+    if ! command -v proot-distro &> /dev/null; then log "[Skipped] 'proot-distro' command (Termux) not found."; elif proot-distro list | grep -q "^${PROOT_DISTRO}[[:space:]]"; then
+      log "Running 'proot-distro upgrade $PROOT_DISTRO' (non-root, may have limited effect)..."
+      # This command might perform some filesystem checks or minor updates without root.
+      # Its main role with root is more significant.
+      if ! retry proot-distro upgrade "$PROOT_DISTRO"; then log "[Warning] 'proot-distro upgrade $PROOT_DISTRO' encountered an issue. Continuing..."; else log "'proot-distro upgrade $PROOT_DISTRO' completed."; fi
+    else notify_error "Specified PRoot distro '$PROOT_DISTRO' not found installed." || ((UPDATE_ERRORS++)); fi
+else log "\n=== Task: PRoot Distro Filesystem Check [Skipped] (No distro specified) ==="; fi
+
+# --- PRoot Guest OS Package Update Task ---
+if [[ -n "$PROOT_DISTRO" && $UPDATE_ERRORS -eq 0 ]]; then
+    log "\n=== Task: PRoot Guest OS Package Update (inside $PROOT_DISTRO) ==="
+    read -r -d '' GUEST_OS_UPDATE_CMDS <<EOF
+set -euo pipefail
+echo "[INFO] Updating package lists inside $PROOT_DISTRO..."
+sudo apt update -y
+echo "[INFO] Upgrading packages inside $PROOT_DISTRO..."
+sudo apt full-upgrade -y
+echo "[INFO] Removing unused packages inside $PROOT_DISTRO..."
+sudo apt autoremove -y
+echo "[INFO] PRoot Guest OS package update sequence completed."
+EOF
+    log "Executing Guest OS package updates inside $PROOT_DISTRO..."
+    if ! proot-distro login "$PROOT_DISTRO" -- bash -c "$GUEST_OS_UPDATE_CMDS" 2>&1 | tee -a "$LOGFILE"; then
+        notify_error "PRoot Guest OS package update failed for '$PROOT_DISTRO'." || ((UPDATE_ERRORS++))
+    else log "PRoot Guest OS package update for '$PROOT_DISTRO' completed successfully."; fi
+else
+    if [[ -n "$PROOT_DISTRO" ]]; then log "\n=== Task: PRoot Guest OS Package Update [Skipped due to previous errors or missing distro] ==="; fi
+fi
+
+
+# --- Git Repository Update Task (inside PRoot Distro) ---
+if [[ -n "$PROOT_DISTRO" && $UPDATE_ERRORS -eq 0 ]]; then
+    log "\n=== Task: Git Repository Update (inside $PROOT_DISTRO: $REPO_DIR) ==="
+    # REPO_DIR is path *inside* the PRoot environment
+    read -r -d '' GIT_PULL_COMMAND <<EOF
+set -euo pipefail
+if [ ! -d "$REPO_DIR" ]; then
+    echo "[ERROR] Repository directory '$REPO_DIR' does not exist inside $PROOT_DISTRO."
+    exit 1
+fi
+if [ ! -d "$REPO_DIR/.git" ]; then
+    echo "[ERROR] No git repository found at '$REPO_DIR' inside $PROOT_DISTRO."
+    exit 1
+fi
+echo "[INFO] Changing to $REPO_DIR and pulling from $GIT_REMOTE $GIT_BRANCH..."
+cd "$REPO_DIR"
+git pull "$GIT_REMOTE" "$GIT_BRANCH"
+echo "[INFO] Git pull complete for $REPO_DIR. Current status (short):"
+git status -s
+EOF
+    log "Executing Git pull inside $PROOT_DISTRO for repository $REPO_DIR..."
+    if ! proot-distro login "$PROOT_DISTRO" --bind /dev/null:/dev/random -- bash -c "$GIT_PULL_COMMAND" 2>&1 | tee -a "$LOGFILE"; then # Added /dev/random bind for git
+        notify_error "Git pull failed in $PROOT_DISTRO at $REPO_DIR. Check log." || ((UPDATE_ERRORS++))
+    else log "Git repository update in $PROOT_DISTRO at $REPO_DIR successful."; fi
+else
+    if [[ -n "$PROOT_DISTRO" ]]; then log "\n=== Task: Git Repository Update [Skipped due to previous errors or missing distro] ==="; fi
+fi
+
+
+# --- Python Virtual Environment Update Task (inside PRoot Distro) ---
+if [[ -n "$PROOT_DISTRO" && $UPDATE_ERRORS -eq 0 ]]; then
+    log "\n=== Task: Python Virtualenv Update (inside $PROOT_DISTRO: $VENV_DIR) ==="
+    # Assume VENV_DIR is relative to the proot user's home or an absolute path inside proot.
+    # Common locations are /root/VENV_DIR or /home/user/VENV_DIR.
+    # For simplicity, assuming it's accessible as /root/$VENV_DIR if proot user is root-like. Adjust if your proot user is different.
+    VENV_PATH_INSIDE_PROOT="/root/$VENV_DIR" 
+    log "Targeting venv at $VENV_PATH_INSIDE_PROOT within $PROOT_DISTRO."
+
+    read -r -d '' PY_UPDATE_COMMANDS <<EOF
+export PATH="\$HOME/.local/bin:\$PATH" 
+set -euo pipefail
+VENV_PATH_INSIDE_PROOT="$VENV_PATH_INSIDE_PROOT" 
+VENV_ACTIVATE="\$VENV_PATH_INSIDE_PROOT/bin/activate"
+echo "[INFO] Checking for virtual environment at \$VENV_PATH_INSIDE_PROOT..."
+if [ ! -f "\$VENV_ACTIVATE" ]; then echo "[ERROR] Virtualenv activation script not found: \$VENV_ACTIVATE." >&2; exit 1; fi
+echo "[INFO] Activating virtualenv: \$VENV_PATH_INSIDE_PROOT"; source "\$VENV_ACTIVATE"
+echo "[INFO] Upgrading pip, setuptools, wheel in \$VENV_PATH_INSIDE_PROOT..."
+if ! pip install --no-cache-dir --upgrade pip setuptools wheel; then echo "[ERROR] Failed to upgrade pip/setuptools/wheel." >&2; exit 1; fi
+echo "[INFO] Checking for outdated packages in \$VENV_PATH_INSIDE_PROOT..."
+# Capture outdated packages, ensuring the command itself doesn't fail the script if no outdated packages are found (pip list --outdated exits 0)
+outdated_packages=\$(pip list --outdated --format=freeze 2>/dev/null | cut -d '=' -f1 | tr '\n' ' ')
+# Trim whitespace
+outdated_packages=\$(echo \$outdated_packages | xargs) 
+if [ -n "\$outdated_packages" ]; then
+    echo "[INFO] Found outdated packages: \$outdated_packages"; echo "[INFO] Attempting to upgrade..."
+    if ! pip install --no-cache-dir -U \$outdated_packages; then echo "[ERROR] Failed to upgrade some packages." >&2; exit 1; fi
+    echo "[INFO] Outdated packages upgrade attempt finished."
+else echo "[INFO] All pip packages in \$VENV_PATH_INSIDE_PROOT are up to date."; fi
+echo "[INFO] Python virtualenv update in \$VENV_PATH_INSIDE_PROOT completed successfully."
+exit 0 
+EOF
+    log "Executing Python virtualenv updates inside $PROOT_DISTRO..."
+    if ! proot-distro login "$PROOT_DISTRO" -- bash -c "$PY_UPDATE_COMMANDS" 2>&1 | tee -a "$LOGFILE"; then
+        notify_error "Python virtualenv update within $PROOT_DISTRO failed. Check log." || ((UPDATE_ERRORS++))
+    else log "Python virtualenv update within $PROOT_DISTRO completed successfully."; fi
+else
+    if [[ -n "$PROOT_DISTRO" ]]; then log "\n=== Task: Python Virtualenv Update [Skipped due to previous errors or missing distro] ==="; fi
+fi
+
+
+# === Summary ===
+log "\n=== Update Script Summary ==="
+if (( UPDATE_ERRORS > 0 )); then
+  final_message="Process completed with $UPDATE_ERRORS error(s). Please check log: $LOGFILE"
+  log "[FAILURE] $final_message"; send_notification "[Update Failed] $final_message on $(hostname)"
+else
+  final_message="All tasks completed successfully."
+  log "[SUCCESS] $final_message"; send_notification "[Update Success] $final_message on $(hostname)"
+fi
+log "\n=== Full Update Script Finished for NON-ROOTED device: $(date) ==="
+# Cleanup main trap before exiting
+trap - EXIT SIGINT SIGTERM
+exit $UPDATE_ERRORS
