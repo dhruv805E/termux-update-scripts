@@ -5,11 +5,10 @@ set -euo pipefail # Exit on error, unset variable, pipe failure
 DEFAULT_LOG_DIR="logs"
 DEFAULT_RETENTION_DAYS=7
 DEFAULT_VENV_DIR="myenv" # Default for your "myenv"
-DEFAULT_DEPENDENCIES=("git" "python" "pip" "curl" "proot-distro" "awk" "tee" "grep" "df" "find" "date" "realpath" "cmp" "coreutils" "jq")
-
-DEFAULT_SCRIPT_URL="https://raw.githubusercontent.com/dhruv805E/termux-update-scripts/main/full-update.sh" # CHANGE THIS if you host it elsewhere
+DEFAULT_DEPENDENCIES=("git" "python" "pip" "curl" "proot-distro" "awk" "tee" "grep" "df" "find" "date" "realpath" "cmp" "coreutils" "jq") # Make sure this line is complete and not truncated
+DEFAULT_SCRIPT_URL="https://raw.githubusercontent.com/dhruv805E/termux-update-scripts/main/full-update.sh" # CHANGE THIS if yo>
 DEFAULT_REPO_DIR="~/myproject" # EXAMPLE: Path inside PRoot (e.g. /root/myproject or /home/user/myproject), adjust as needed
-DEFAULT_EXPECTED_HASH_URL="https://raw.githubusercontent.com/dhruv805E/termux-update-scripts/main/full-update.sh.sha256" # CHANGE THIS if you host it elsewhere
+DEFAULT_EXPECTED_HASH_URL="https://raw.githubusercontent.com/dhruv805E/termux-update-scripts/main/full-update.sh.sha256" # CHA>
 DEFAULT_REQUIRED_SPACE_MB=500
 DEFAULT_GIT_REMOTE="origin"
 DEFAULT_GIT_BRANCH="main"
