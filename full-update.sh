@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail # Exit on error, unset variable, pipe failure
 
+echo "DEBUG exec ARGS: Script started. Total args: $#. All args: [$*]"
+echo "DEBUG exec ARGS: \$1=[$1], \$2=[$2], \$3=[$3], \$4=[$4], \$5=[$5], \$6=[$6], \$7=[$7]"
+
+
 # === Default Configuration ===
 DEFAULT_LOG_DIR="logs"
 DEFAULT_RETENTION_DAYS=7
@@ -138,6 +142,9 @@ while [[ $# -gt 0 ]]; do
     *) echo "[ERROR] Unknown option: $1" >&2; usage ;;
   esac
 done
+
+log "DEBUG exec PARSED: PROOT_DISTRO=[$PROOT_DISTRO], NOTIFY=[$NOTIFY], REPO_DIR=[$REPO_DIR], VENV_DIR=[$VENV_DIR], PROOT_DISTRO_SPECIFIED_VIA_ARG=[$PROOT_DISTRO_SPECIFIED_VIA_ARG]"
+
 
 if ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then echo "[ERROR] --retention value '$RETENTION_DAYS' is not a valid number." >&2; usage; fi
 if ! [[ "$REQUIRED_SPACE_MB" =~ ^[0-9]+$ ]]; then echo "[ERROR] --req-space value '$REQUIRED_SPACE_MB' is not a valid number." >&2; usage; fi
@@ -305,9 +312,9 @@ if [[ -n "$PROOT_DISTRO" ]]; then
     log "\n=== Task: PRoot Distro Filesystem Check ($PROOT_DISTRO) ==="
     if ! command -v proot-distro &> /dev/null; then 
         log "[Skipped] 'proot-distro' command (Termux) not found."
-    # MODIFIED LINE BELOW
-    elif proot-distro list | grep -qw "$PROOT_DISTRO"; then # Check if PROOT_DISTRO is listed as an installed distro
-      log "Verified PRoot distro '$PROOT_DISTRO' is installed." # Added confirmation
+    # WORKAROUND: Check if distro is accessible via login, as 'list' is unreliable on this system
+    elif proot-distro login "$PROOT_DISTRO" -- true &>/dev/null; then
+      log "Verified PRoot distro '$PROOT_DISTRO' is accessible (login test successful)."
       log "Running 'proot-distro upgrade $PROOT_DISTRO' (non-root, may have limited effect on OS packages)..."
       # This command might perform some filesystem checks or minor updates without root.
       if ! retry proot-distro upgrade "$PROOT_DISTRO"; then 
@@ -316,10 +323,11 @@ if [[ -n "$PROOT_DISTRO" ]]; then
           log "'proot-distro upgrade $PROOT_DISTRO' completed."
       fi
     else 
-      # This means proot-distro is installed, but the specified PROOT_DISTRO is not in its list of installed distros.
-      # The output of "proot-distro list" (which might be help text or an empty list) might have been tee'd to the log just before this.
-      notify_error "Specified PRoot distro '$PROOT_DISTRO' not found in the list of installed distros. Please install it first (e.g., 'proot-distro install $PROOT_DISTRO')." || ((UPDATE_ERRORS++))
+      # This means proot-distro is installed, but the specified PROOT_DISTRO is not login-able.
+      SCRIPT_TRAP_EXIT_CODE=1; notify_error "Specified PRoot distro '$PROOT_DISTRO' is not accessible via login. Please ensure it is correctly installed and usable (e.g., try 'proot-distro login $PROOT_DISTRO' manually)." || ((UPDATE_ERRORS++))
     fi
+# ... (rest of the script, including the "else" for the "if [[ -n "$PROOT_DISTRO" ]]" part)
+
 else 
     log "\n=== Task: PRoot Distro Filesystem Check [Skipped] (No distro specified) ==="
 fi
