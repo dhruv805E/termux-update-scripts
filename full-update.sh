@@ -147,10 +147,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-
 if ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then echo "[ERROR] --retention value '$RETENTION_DAYS' is not a valid number." >&2; usage; fi
 if ! [[ "$REQUIRED_SPACE_MB" =~ ^[0-9]+$ ]]; then echo "[ERROR] --req-space value '$REQUIRED_SPACE_MB' is not a valid number." >&2; usage; fi
-
 
 # === Setup Logging ===  <-- MOVED HERE
 mkdir -p "$LOG_DIR" # Ensure LOG_DIR exists (using final value of LOG_DIR from args or default)
@@ -172,12 +170,10 @@ cleanup_and_exit() {
 trap 'cleanup_and_exit' EXIT SIGINT SIGTERM
 # Now it's safe to use the log() function.
 
-log "DEBUG exec PARSED: PROOT_DISTRO=[$PROOT_DISTRO], NOTIFY=[$NOTIFY], REPO_DIR=[$REPO_DIR], VENV_DIR=[$VENV_DIR], PROOT_DISTRO_SPECIFIED_VIA_ARG=[$PROOT_DISTRO_SPECIFIED_VIA_ARG]"
-
-
-
 # === Debug Parsed Arguments (NOW IT'S SAFE TO LOG) ===
 log "DEBUG exec PARSED: PROOT_DISTRO=[$PROOT_DISTRO], NOTIFY=[$NOTIFY], REPO_DIR=[$REPO_DIR], VENV_DIR=[$VENV_DIR], PROOT_DISTRO_SPECIFIED_VIA_ARG=[$PROOT_DISTRO_SPECIFIED_VIA_ARG]"
+
+
 
 # === Initial Log Messages ===
 log "=== Starting Update Script ($SCRIPT_NAME) for NON-ROOTED device ==="
@@ -337,32 +333,9 @@ UPDATE_ERRORS=0
 
 
 # --- PRoot Guest OS Package Update Task ---
-log "\n=== Task: PRoot Guest OS Package Update (inside $PROOT_DISTRO) ==="
-ACCESSIBLE_DISTRO=false
-if [[ -n "$PROOT_DISTRO" ]]; then
-    if ! command -v proot-distro &> /dev/null; then
-        log "[Skipped] 'proot-distro' command (Termux) not found for Guest OS update."
-    else
-        log "DEBUG: Attempting login test for '$PROOT_DISTRO' in Guest OS Update section..."
-        # Run the command WITHOUT &>/dev/null first to see its direct output/errors
-        proot-distro login "$PROOT_DISTRO" -- true 
-        LOGIN_TEST_EXIT_CODE=$?
-        log "DEBUG: Login test for '$PROOT_DISTRO' finished with exit code: $LOGIN_TEST_EXIT_CODE"
 
-        if [[ $LOGIN_TEST_EXIT_CODE -eq 0 ]]; then
-            log "Verified PRoot distro '$PROOT_DISTRO' IS accessible for Guest OS package update (login test successful)."
-            ACCESSIBLE_DISTRO=true
-        else
-            SCRIPT_TRAP_EXIT_CODE=1 # Ensure trap knows this is a script-intended exit
-            notify_error "Specified PRoot distro '$PROOT_DISTRO' is NOT accessible via login for Guest OS update (test returned exit code $LOGIN_TEST_EXIT_CODE)." || ((UPDATE_ERRORS++))
-        fi
-    fi
-else
-    log "No PRoot distro specified, skipping Guest OS package update."
-fi
-
-# This 'if' block below is where the heredoc and execution happen
 if [[ "$ACCESSIBLE_DISTRO" == true && $UPDATE_ERRORS -eq 0 ]]; then
+       log "DEBUG: About to define GUEST_OS_UPDATE_CMDS heredoc." # DEBUG Line
        read -r -d '' GUEST_OS_UPDATE_CMDS <<EOF
 # set -euo pipefail # Temporarily REMOVE or COMMENT OUT for debugging this block
 echo "[INFO GUEST] Starting package update sequence inside $PROOT_DISTRO..."
@@ -380,15 +353,28 @@ echo "[INFO GUEST] Running: \$SUDO_CMD apt autoremove -y"
 echo "[INFO GUEST] PRoot Guest OS package update sequence finished."
 exit 0 
 EOF
-    log "Executing Guest OS package updates inside $PROOT_DISTRO..."
-    if ! proot-distro login "$PROOT_DISTRO" --bash -c "$GUEST_OS_UPDATE_CMDS" 2>&1 | tee -a "$LOGFILE"; then
-        notify_error "PRoot Guest OS package update script execution failed for '$PROOT_DISTRO'." || ((UPDATE_ERRORS++))
-    else 
-        log "PRoot Guest OS package update for '$PROOT_DISTRO' commands sent."
-    fi
+       # === BEGIN NEW DEBUG BLOCK for read command ===
+       READ_HEREDOC_EXIT_CODE=$?
+       log "DEBUG: Heredoc definition for GUEST_OS_UPDATE_CMDS finished. 'read' command exit code: $READ_HEREDOC_EXIT_CODE"
+       if [[ $READ_HEREDOC_EXIT_CODE -ne 0 ]]; then
+           SCRIPT_TRAP_EXIT_CODE=1 # Ensure trap knows this is a script-intended exit
+           # Note: notify_error calls exit 1, which would trigger the trap.
+           # The SCRIPT_TRAP_EXIT_CODE ensures the trap reports the code we want if it differs from generic exit.
+           notify_error "FATAL: Failed to define GUEST_OS_UPDATE_CMDS heredoc (read command exited with $READ_HEREDOC_EXIT_CODE)." || ((UPDATE_ERRORS++)) 
+           # notify_error will exit if --force is not used.
+       fi
+       # === END NEW DEBUG BLOCK for read command ===
+
+       log "Executing Guest OS package updates inside $PROOT_DISTRO..." # This is the line we want to see
+       if ! proot-distro login "$PROOT_DISTRO" --bash -c "$GUEST_OS_UPDATE_CMDS" 2>&1 | tee -a "$LOGFILE"; then
+           notify_error "PRoot Guest OS package update script execution failed for '$PROOT_DISTRO'." || ((UPDATE_ERRORS++))
+       else 
+           log "PRoot Guest OS package update for '$PROOT_DISTRO' commands sent."
+       fi
 elif [[ -n "$PROOT_DISTRO" ]]; then 
     log "PRoot Guest OS Package Update for '$PROOT_DISTRO' [Skipped due to previous errors or inaccessibility]."
 fi
+
 
 
 # --- Git Repository Update Task (inside PRoot Distro) ---
