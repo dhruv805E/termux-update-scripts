@@ -418,7 +418,7 @@ if [[ -n "$PROOT_DISTRO" && $UPDATE_ERRORS -eq 0 ]]; then
     log "\n=== Task: Python Virtualenv Update (inside $PROOT_DISTRO: $VENV_DIR) ==="
     # VENV_DIR is the name of the venv dir, usually inside the user's home in proot
     # Let's assume user's home dir is /root or $HOME if not root (e.g. /home/user)
-    read -r -d '' PY_UPDATE_COMMANDS <<EOF
+    read -r PY_UPDATE_COMMANDS <<EOF
 export PATH="\$HOME/.local/bin:\$PATH" 
 set -euo pipefail
 # Construct VENV_PATH based on whether VENV_DIR is absolute or relative
