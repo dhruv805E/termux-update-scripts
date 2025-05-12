@@ -306,34 +306,43 @@ log "Log rotation check complete."
 log "\n=== Starting Main Update Tasks for PRoot Distro: $(date) ==="
 UPDATE_ERRORS=0 
 
-# --- PRoot Distro Filesystem Check/Update (Non-Root) ---
-#if [[ -n "$PROOT_DISTRO" ]]; then
-#    log "\n=== Task: PRoot Distro Filesystem Check ($PROOT_DISTRO) ==="
-#    if ! command -v proot-distro &> /dev/null; then 
-#        log "[Skipped] 'proot-distro' command (Termux) not found."
-#    # WORKAROUND: Check if distro is accessible via login, as 'list' is unreliable on this system
-#    elif proot-distro login "$PROOT_DISTRO" -- true &>/dev/null; then
-#      log "Verified PRoot distro '$PROOT_DISTRO' is accessible (login test successful)."
-#      log "Running 'proot-distro upgrade $PROOT_DISTRO' (non-root, may have limited effect on OS packages)..."
-#      # This command might perform some filesystem checks or minor updates without root.
-#      if ! retry proot-distro upgrade "$PROOT_DISTRO"; then 
-#          log "[Warning] 'proot-distro upgrade $PROOT_DISTRO' encountered an issue. This is sometimes normal on non-rooted devices. Continuing to update packages inside the guest OS."
-#      else 
-#          log "'proot-distro upgrade $PROOT_DISTRO' completed."
-#      fi
-#    else 
-#      # This means proot-distro is installed, but the specified PROOT_DISTRO is not login-able.
-#      SCRIPT_TRAP_EXIT_CODE=1; notify_error "Specified PRoot distro '$PROOT_DISTRO' is not accessible via login. Please ensure it is correctly installed and usable (e.g., try 'proot-distro login $PROOT_DISTRO' manually)." || ((UPDATE_ERRORS++))
-#    fi
-# ... (rest of the script, including the "else" for the "if [[ -n "$PROOT_DISTRO" ]]" part)
-
-#else 
-#    log "\n=== Task: PRoot Distro Filesystem Check [Skipped] (No distro specified) ==="
-#fi
-
 
 # --- PRoot Guest OS Package Update Task ---
+log "\n=== Task: PRoot Guest OS Package Update (inside $PROOT_DISTRO) ==="
+ACCESSIBLE_DISTRO=false # Initial initialization for this task
+if [[ -n "$PROOT_DISTRO" ]]; then
+    if ! command -v proot-distro &> /dev/null; then
+        log "[Skipped] 'proot-distro' command (Termux) not found for Guest OS update."
+        # ACCESSIBLE_DISTRO remains false
+    else
+        log "DEBUG: Attempting login test for '$PROOT_DISTRO' in Guest OS Update section..."
+        proot-distro login "$PROOT_DISTRO" -- true 
+        LOGIN_TEST_EXIT_CODE=$?
+        log "DEBUG: Login test for '$PROOT_DISTRO' finished with exit code: $LOGIN_TEST_EXIT_CODE"
 
+        if [[ $LOGIN_TEST_EXIT_CODE -eq 0 ]]; then
+            log "Verified PRoot distro '$PROOT_DISTRO' IS accessible for Guest OS package update (login test successful)."
+            ACCESSIBLE_DISTRO=true # Set to true on success
+        else
+            SCRIPT_TRAP_EXIT_CODE=1 
+            notify_error "Specified PRoot distro '$PROOT_DISTRO' is NOT accessible via login for Guest OS update (test returned exit code $LOGIN_TEST_EXIT_CODE)." # This will exit if --force not used
+            # If --force IS used, ACCESSIBLE_DISTRO remains false
+        fi
+    fi
+else
+    log "No PRoot distro specified, skipping Guest OS package update."
+    # ACCESSIBLE_DISTRO remains false
+fi
+
+# === PARANOID CHECK AND DEBUG ===
+log "DEBUG: Just before conditional execution of Guest OS Updates. ACCESSIBLE_DISTRO=[${ACCESSIBLE_DISTRO:-UNSET_OR_EMPTY}], UPDATE_ERRORS=[$UPDATE_ERRORS]"
+# If ACCESSIBLE_DISTRO was somehow truly unset, the next line would error.
+# Let's ensure it has *some* value, defaulting to false if previous logic failed to set it.
+: "${ACCESSIBLE_DISTRO:=false}" # This ensures ACCESSIBLE_DISTRO is set to 'false' if it was null or unset.
+log "DEBUG: After \": \${ACCESSIBLE_DISTRO:=false}\", ACCESSIBLE_DISTRO=[$ACCESSIBLE_DISTRO]"
+# === END PARANOID CHECK ===
+
+# This 'if' block below is where the heredoc and execution happen
 if [[ "$ACCESSIBLE_DISTRO" == true && $UPDATE_ERRORS -eq 0 ]]; then
        log "DEBUG: About to define GUEST_OS_UPDATE_CMDS heredoc." # DEBUG Line
        read -r -d '' GUEST_OS_UPDATE_CMDS <<EOF
