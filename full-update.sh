@@ -461,6 +461,10 @@ else
   log "[SUCCESS] $final_message"; send_notification "[Update Success] $final_message on $(hostname)"
 fi
 log "\n=== Full Update Script Finished for NON-ROOTED device: $(date) ==="
-SCRIPT_TRAP_EXIT_CODE=0 # Indicate normal exit
-trap - EXIT SIGINT SIGTERM # Cleanly remove trap for normal exit
-exit $UPDATE_ERRORS
+FINAL_EXIT_CODE=$UPDATE_ERRORS # Store the intended exit code
+
+log "[INFO] Attempting to disable EXIT trap before final exit..."
+trap - EXIT SIGINT SIGTERM || log "[WARNING] Could not disable trap, but proceeding with exit."
+
+log "[INFO] Final planned script exit with code: $FINAL_EXIT_CODE"
+exit "$FINAL_EXIT_CODE"
