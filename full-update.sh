@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail # Exit on error, unset variable, pipe failure
 
+#
+
 echo "DEBUG exec ARGS: Script started. Total args: $#. All args: [$*]"
 echo "DEBUG exec ARGS: \$1=[$1], \$2=[$2], \$3=[$3], \$4=[$4], \$5=[$5], \$6=[$6], \$7=[$7]"
 
