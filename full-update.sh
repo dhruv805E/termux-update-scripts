@@ -309,54 +309,85 @@ log "\n=== Starting Main Update Tasks for PRoot Distro: $(date) ==="
 UPDATE_ERRORS=0 
 
 # --- PRoot Distro Filesystem Check/Update (Non-Root) ---
-if [[ -n "$PROOT_DISTRO" ]]; then
-    log "\n=== Task: PRoot Distro Filesystem Check ($PROOT_DISTRO) ==="
-    if ! command -v proot-distro &> /dev/null; then 
-        log "[Skipped] 'proot-distro' command (Termux) not found."
-    # WORKAROUND: Check if distro is accessible via login, as 'list' is unreliable on this system
-    elif proot-distro login "$PROOT_DISTRO" -- true &>/dev/null; then
-      log "Verified PRoot distro '$PROOT_DISTRO' is accessible (login test successful)."
-      log "Running 'proot-distro upgrade $PROOT_DISTRO' (non-root, may have limited effect on OS packages)..."
-      # This command might perform some filesystem checks or minor updates without root.
-      if ! retry proot-distro upgrade "$PROOT_DISTRO"; then 
-          log "[Warning] 'proot-distro upgrade $PROOT_DISTRO' encountered an issue. This is sometimes normal on non-rooted devices. Continuing to update packages inside the guest OS."
-      else 
-          log "'proot-distro upgrade $PROOT_DISTRO' completed."
-      fi
-    else 
-      # This means proot-distro is installed, but the specified PROOT_DISTRO is not login-able.
-      SCRIPT_TRAP_EXIT_CODE=1; notify_error "Specified PRoot distro '$PROOT_DISTRO' is not accessible via login. Please ensure it is correctly installed and usable (e.g., try 'proot-distro login $PROOT_DISTRO' manually)." || ((UPDATE_ERRORS++))
-    fi
+#if [[ -n "$PROOT_DISTRO" ]]; then
+#    log "\n=== Task: PRoot Distro Filesystem Check ($PROOT_DISTRO) ==="
+#    if ! command -v proot-distro &> /dev/null; then 
+#        log "[Skipped] 'proot-distro' command (Termux) not found."
+#    # WORKAROUND: Check if distro is accessible via login, as 'list' is unreliable on this system
+#    elif proot-distro login "$PROOT_DISTRO" -- true &>/dev/null; then
+#      log "Verified PRoot distro '$PROOT_DISTRO' is accessible (login test successful)."
+#      log "Running 'proot-distro upgrade $PROOT_DISTRO' (non-root, may have limited effect on OS packages)..."
+#      # This command might perform some filesystem checks or minor updates without root.
+#      if ! retry proot-distro upgrade "$PROOT_DISTRO"; then 
+#          log "[Warning] 'proot-distro upgrade $PROOT_DISTRO' encountered an issue. This is sometimes normal on non-rooted devices. Continuing to update packages inside the guest OS."
+#      else 
+#          log "'proot-distro upgrade $PROOT_DISTRO' completed."
+#      fi
+#    else 
+#      # This means proot-distro is installed, but the specified PROOT_DISTRO is not login-able.
+#      SCRIPT_TRAP_EXIT_CODE=1; notify_error "Specified PRoot distro '$PROOT_DISTRO' is not accessible via login. Please ensure it is correctly installed and usable (e.g., try 'proot-distro login $PROOT_DISTRO' manually)." || ((UPDATE_ERRORS++))
+#    fi
 # ... (rest of the script, including the "else" for the "if [[ -n "$PROOT_DISTRO" ]]" part)
 
-else 
-    log "\n=== Task: PRoot Distro Filesystem Check [Skipped] (No distro specified) ==="
-fi
+#else 
+#    log "\n=== Task: PRoot Distro Filesystem Check [Skipped] (No distro specified) ==="
+#fi
+
 
 # --- PRoot Guest OS Package Update Task ---
-if [[ -n "$PROOT_DISTRO" && $UPDATE_ERRORS -eq 0 ]]; then
-    log "\n=== Task: PRoot Guest OS Package Update (inside $PROOT_DISTRO) ==="
-    # Note: `sudo` inside the proot is fine if your proot user has sudo rights *within that guest environment*,
-    # or if the default proot user (often root) doesn't strictly need sudo for apt.
-    # For wide compatibility, keeping sudo. User can remove if their proot user is root.
-    read -r -d '' GUEST_OS_UPDATE_CMDS <<EOF
-set -euo pipefail
-echo "[INFO] Updating package lists inside $PROOT_DISTRO..."
+log "\n=== Task: PRoot Guest OS Package Update (inside $PROOT_DISTRO) ==="
+ACCESSIBLE_DISTRO=false
+if [[ -n "$PROOT_DISTRO" ]]; then
+    if ! command -v proot-distro &> /dev/null; then
+        log "[Skipped] 'proot-distro' command (Termux) not found for Guest OS update."
+    else
+        log "DEBUG: Attempting login test for '$PROOT_DISTRO' in Guest OS Update section..."
+        # Run the command WITHOUT &>/dev/null first to see its direct output/errors
+        proot-distro login "$PROOT_DISTRO" -- true 
+        LOGIN_TEST_EXIT_CODE=$?
+        log "DEBUG: Login test for '$PROOT_DISTRO' finished with exit code: $LOGIN_TEST_EXIT_CODE"
+
+        if [[ $LOGIN_TEST_EXIT_CODE -eq 0 ]]; then
+            log "Verified PRoot distro '$PROOT_DISTRO' IS accessible for Guest OS package update (login test successful)."
+            ACCESSIBLE_DISTRO=true
+        else
+            SCRIPT_TRAP_EXIT_CODE=1 # Ensure trap knows this is a script-intended exit
+            notify_error "Specified PRoot distro '$PROOT_DISTRO' is NOT accessible via login for Guest OS update (test returned exit code $LOGIN_TEST_EXIT_CODE)." || ((UPDATE_ERRORS++))
+        fi
+    fi
+else
+    log "No PRoot distro specified, skipping Guest OS package update."
+fi
+
+# This 'if' block below is where the heredoc and execution happen
+if [[ "$ACCESSIBLE_DISTRO" == true && $UPDATE_ERRORS -eq 0 ]]; then
+       read -r -d '' GUEST_OS_UPDATE_CMDS <<EOF
+# set -euo pipefail # Temporarily REMOVE or COMMENT OUT for debugging this block
+echo "[INFO GUEST] Starting package update sequence inside $PROOT_DISTRO..."
 if command -v sudo &> /dev/null; then SUDO_CMD="sudo"; else SUDO_CMD=""; fi
-\$SUDO_CMD apt update -y
-echo "[INFO] Upgrading packages inside $PROOT_DISTRO..."
-\$SUDO_CMD apt full-upgrade -y
-echo "[INFO] Removing unused packages inside $PROOT_DISTRO..."
-\$SUDO_CMD apt autoremove -y
-echo "[INFO] PRoot Guest OS package update sequence completed."
+
+echo "[INFO GUEST] Running: \$SUDO_CMD apt update -y"
+\$SUDO_CMD apt update -y 2>&1 || echo "[ERROR GUEST] 'apt update' failed with exit code \$?."
+
+echo "[INFO GUEST] Running: \$SUDO_CMD apt full-upgrade -y"
+\$SUDO_CMD apt full-upgrade -y 2>&1 || echo "[ERROR GUEST] 'apt full-upgrade' failed with exit code \$?."
+
+echo "[INFO GUEST] Running: \$SUDO_CMD apt autoremove -y"
+\$SUDO_CMD apt autoremove -y 2>&1 || echo "[ERROR GUEST] 'apt autoremove' failed with exit code \$?."
+
+echo "[INFO GUEST] PRoot Guest OS package update sequence finished."
+exit 0 
 EOF
     log "Executing Guest OS package updates inside $PROOT_DISTRO..."
-    if ! proot-distro login "$PROOT_DISTRO" -- bash -c "$GUEST_OS_UPDATE_CMDS" 2>&1 | tee -a "$LOGFILE"; then
-        notify_error "PRoot Guest OS package update failed for '$PROOT_DISTRO'." || ((UPDATE_ERRORS++))
-    else log "PRoot Guest OS package update for '$PROOT_DISTRO' completed successfully."; fi
-else
-    if [[ -n "$PROOT_DISTRO" ]]; then log "\n=== Task: PRoot Guest OS Package Update [Skipped due to previous errors or missing distro] ==="; fi
+    if ! proot-distro login "$PROOT_DISTRO" --bash -c "$GUEST_OS_UPDATE_CMDS" 2>&1 | tee -a "$LOGFILE"; then
+        notify_error "PRoot Guest OS package update script execution failed for '$PROOT_DISTRO'." || ((UPDATE_ERRORS++))
+    else 
+        log "PRoot Guest OS package update for '$PROOT_DISTRO' commands sent."
+    fi
+elif [[ -n "$PROOT_DISTRO" ]]; then 
+    log "PRoot Guest OS Package Update for '$PROOT_DISTRO' [Skipped due to previous errors or inaccessibility]."
 fi
+
 
 # --- Git Repository Update Task (inside PRoot Distro) ---
 if [[ -n "$PROOT_DISTRO" && $UPDATE_ERRORS -eq 0 ]]; then
