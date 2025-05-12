@@ -384,12 +384,10 @@ elif [[ -n "$PROOT_DISTRO" ]]; then
     log "PRoot Guest OS Package Update for '$PROOT_DISTRO' [Skipped due to previous errors or inaccessibility]."
 fi
 
-
-
 # --- Git Repository Update Task (inside PRoot Distro) ---
 if [[ -n "$PROOT_DISTRO" && $UPDATE_ERRORS -eq 0 ]]; then
     log "\n=== Task: Git Repository Update (inside $PROOT_DISTRO: $REPO_DIR) ==="
-    read -r -d '' GIT_PULL_COMMAND <<EOF
+    read -r GIT_PULL_COMMAND <<EOF
 set -euo pipefail
 # Expand ~ to user's home directory inside proot if REPO_DIR starts with ~/
 actual_repo_dir="\$HOME/\${REPO_DIR#\~\/}"
