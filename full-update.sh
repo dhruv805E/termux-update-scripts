@@ -375,7 +375,7 @@ EOF
        # === END NEW DEBUG BLOCK for read command ===
 
        log "Executing Guest OS package updates inside $PROOT_DISTRO..." # This is the line we want to see
-       if ! proot-distro login "$PROOT_DISTRO" --bash -c "$GUEST_OS_UPDATE_CMDS" 2>&1 | tee -a "$LOGFILE"; then
+       if ! proot-distro login "$PROOT_DISTRO" -- bash -c "$GUEST_OS_UPDATE_CMDS" 2>&1 | tee -a "$LOGFILE"; then
            notify_error "PRoot Guest OS package update script execution failed for '$PROOT_DISTRO'." || ((UPDATE_ERRORS++))
        else 
            log "PRoot Guest OS package update for '$PROOT_DISTRO' commands sent."
@@ -406,7 +406,7 @@ echo "[INFO] Git pull complete for \$actual_repo_dir. Current status (short):"; 
 EOF
     log "Executing Git pull inside $PROOT_DISTRO for repository $REPO_DIR..."
     # Bind /dev/urandom for git operations that might need entropy
-    if ! proot-distro login "$PROOT_DISTRO" --bind /dev/urandom:/dev/random --bash -c "$GIT_PULL_COMMAND" 2>&1 | tee -a "$LOGFILE"; then
+    if ! proot-distro login "$PROOT_DISTRO" --bind /dev/urandom:/dev/random -- bash -c "$GIT_PULL_COMMAND" 2>&1 | tee -a "$LOGFILE"; then
         notify_error "Git pull failed in $PROOT_DISTRO at $REPO_DIR. Check log." || ((UPDATE_ERRORS++))
     else log "Git repository update in $PROOT_DISTRO at $REPO_DIR successful."; fi
 else
@@ -446,7 +446,7 @@ echo "[INFO] Python virtualenv update in \$VENV_PATH_INSIDE_PROOT completed succ
 exit 0 
 EOF
     log "Executing Python virtualenv updates inside $PROOT_DISTRO..."
-    if ! proot-distro login "$PROOT_DISTRO" --bash -c "$PY_UPDATE_COMMANDS" 2>&1 | tee -a "$LOGFILE"; then
+    if ! proot-distro login "$PROOT_DISTRO" -- bash -c "$PY_UPDATE_COMMANDS" 2>&1 | tee -a "$LOGFILE"; then
         notify_error "Python virtualenv update within $PROOT_DISTRO for $VENV_DIR failed. Check log." || ((UPDATE_ERRORS++))
     else log "Python virtualenv update within $PROOT_DISTRO for $VENV_DIR completed successfully."; fi
 else
