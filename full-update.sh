@@ -4,6 +4,8 @@ set -euo pipefail # Exit on error, unset variable, pipe failure
 echo "DEBUG exec ARGS: Script started. Total args: $#. All args: [$*]"
 echo "DEBUG exec ARGS: \$1=[$1], \$2=[$2], \$3=[$3], \$4=[$4], \$5=[$5], \$6=[$6], \$7=[$7]"
 
+# Save original arguments before they are shifted by the parsing loop
+ORIGINAL_ARGS=("$@")
 
 # === Default Configuration ===
 DEFAULT_LOG_DIR="logs"
@@ -143,8 +145,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-log "DEBUG exec PARSED: PROOT_DISTRO=[$PROOT_DISTRO], NOTIFY=[$NOTIFY], REPO_DIR=[$REPO_DIR], VENV_DIR=[$VENV_DIR], PROOT_DISTRO_SPECIFIED_VIA_ARG=[$PROOT_DISTRO_SPECIFIED_VIA_ARG]"
-
 
 if ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then echo "[ERROR] --retention value '$RETENTION_DAYS' is not a valid number." >&2; usage; fi
 if ! [[ "$REQUIRED_SPACE_MB" =~ ^[0-9]+$ ]]; then echo "[ERROR] --req-space value '$REQUIRED_SPACE_MB' is not a valid number." >&2; usage; fi
@@ -169,6 +169,10 @@ cleanup_and_exit() {
 }
 trap 'cleanup_and_exit' EXIT SIGINT SIGTERM
 # Now it's safe to use the log() function.
+
+log "DEBUG exec PARSED: PROOT_DISTRO=[$PROOT_DISTRO], NOTIFY=[$NOTIFY], REPO_DIR=[$REPO_DIR], VENV_DIR=[$VENV_DIR], PROOT_DISTRO_SPECIFIED_VIA_ARG=[$PROOT_DISTRO_SPECIFIED_VIA_ARG]"
+
+
 
 # === Debug Parsed Arguments (NOW IT'S SAFE TO LOG) ===
 log "DEBUG exec PARSED: PROOT_DISTRO=[$PROOT_DISTRO], NOTIFY=[$NOTIFY], REPO_DIR=[$REPO_DIR], VENV_DIR=[$VENV_DIR], PROOT_DISTRO_SPECIFIED_VIA_ARG=[$PROOT_DISTRO_SPECIFIED_VIA_ARG]"
@@ -268,8 +272,17 @@ if curl -fsSL --retry 3 --connect-timeout 30 "$SCRIPT_URL" -o "$TEMP_SCRIPT"; th
             log "Script updated successfully. Re-running...";
             # Clean up *before* exec, and remove trap for current process
             rm -f "$TEMP_SCRIPT" "$TEMP_HASH_FILE"
-            trap - EXIT SIGINT SIGTERM
-            exec "$SCRIPT_FILE" "$@"
+            # Remove from global cleanup array if you were using one for TEMP_FILES_TO_CLEAN
+            # TEMP_FILES_TO_CLEAN=() 
+
+            # --- BEGIN NEW DEBUG LINES ---
+            log "DEBUG EXEC: Preparing to exec. Current script's SCRIPT_FILE is: [$SCRIPT_FILE]"
+            log "DEBUG EXEC: Current script's arguments were (\$# is $#): [$(printf "'%s' " "$@")]"
+            # --- END NEW DEBUG LINES ---
+
+            trap - EXIT SIGINT SIGTERM # Disable trap for the current process before exec
+            exec "$SCRIPT_FILE" "${ORIGINAL_ARGS[@]}"
+
         else
             SCRIPT_TRAP_EXIT_CODE=1; notify_error "Failed to copy updated script to $SCRIPT_FILE."
         fi
