@@ -345,7 +345,7 @@ log "DEBUG: After \": \${ACCESSIBLE_DISTRO:=false}\", ACCESSIBLE_DISTRO=[$ACCESS
 # This 'if' block below is where the heredoc and execution happen
 if [[ "$ACCESSIBLE_DISTRO" == true && $UPDATE_ERRORS -eq 0 ]]; then
        log "DEBUG: About to define GUEST_OS_UPDATE_CMDS heredoc." # DEBUG Line
-       read -r -d '' GUEST_OS_UPDATE_CMDS <<EOF
+       read -r GUEST_OS_UPDATE_CMDS <<EOF
 # set -euo pipefail # Temporarily REMOVE or COMMENT OUT for debugging this block
 echo "[INFO GUEST] Starting package update sequence inside $PROOT_DISTRO..."
 if command -v sudo &> /dev/null; then SUDO_CMD="sudo"; else SUDO_CMD=""; fi
