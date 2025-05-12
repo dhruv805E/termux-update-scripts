@@ -149,41 +149,29 @@ log "DEBUG exec PARSED: PROOT_DISTRO=[$PROOT_DISTRO], NOTIFY=[$NOTIFY], REPO_DIR
 if ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then echo "[ERROR] --retention value '$RETENTION_DAYS' is not a valid number." >&2; usage; fi
 if ! [[ "$REQUIRED_SPACE_MB" =~ ^[0-9]+$ ]]; then echo "[ERROR] --req-space value '$REQUIRED_SPACE_MB' is not a valid number." >&2; usage; fi
 
-# === Setup Logging ===
-mkdir -p "$LOG_DIR"
-LOGFILE="$LOG_DIR/update_$(date '+%Y-%m-%d_%H-%M-%S').log"
-# This trap will catch EXIT, SIGINT, SIGTERM.
-# For self-update, `exec` replaces the process, so this trap doesn't fire for the old process then.
-# If script exits due to `set -e`, $? will be non-zero. If `exit 0`, $? is 0.
+
+# === Setup Logging ===  <-- MOVED HERE
+mkdir -p "$LOG_DIR" # Ensure LOG_DIR exists (using final value of LOG_DIR from args or default)
+LOGFILE="$LOG_DIR/update_$(date '+%Y-%m-%d_%H-%M-%S').log" # Define LOGFILE path
+
+# Define trap now that LOGFILE is set, if trap function uses log()
 SCRIPT_TRAP_EXIT_CODE=0
 cleanup_and_exit() {
     local exit_code=$? 
-    # If SCRIPT_TRAP_EXIT_CODE is already set by our explicit exit, use that.
-    # This helps differentiate deliberate exits from `set -e` exits.
-    if [[ "$SCRIPT_TRAP_EXIT_CODE" -ne 0 ]]; then
-        exit_code="$SCRIPT_TRAP_EXIT_CODE"
-    fi
-
-    log "[INFO] Script exiting with code: $exit_code"
-    # Clean up any known global temporary files if needed here
-    # Example: rm -f "$TEMP_SCRIPT" "$TEMP_HASH_FILE" (if they were global)
-    
-    # Only print "interrupted" if it was an actual signal or unexpected error
-    if (( exit_code != 0 && exit_code != 130 && exit_code != 143 )); then # 130=SIGINT (Ctrl+C), 143=SIGTERM
-        # Avoid double "Script interrupted" if notify_error already called exit
-        # This requires notify_error to set SCRIPT_TRAP_EXIT_CODE before calling exit 1
-        # Or check if the last log message was already an error.
-        # For now, the simple message is acceptable.
-        echo "[ERROR] Script interrupted or exited with error." | tee -a "$LOGFILE"
+    if [[ "$SCRIPT_TRAP_EXIT_CODE" -ne 0 ]]; then exit_code="$SCRIPT_TRAP_EXIT_CODE"; fi
+    # Using echo here initially in case log() itself has issues or LOGFILE isn't writable
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] Script exiting with code: $exit_code" | tee -a "$LOGFILE" # log() might be safer if it's robust
+    if (( exit_code != 0 && exit_code != 130 && exit_code != 143 )); then 
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] Script interrupted or exited with error." | tee -a "$LOGFILE"
     elif (( exit_code == 130 || exit_code == 143 )); then
-        echo "[WARN] Script interrupted by signal (Ctrl+C or Term)." | tee -a "$LOGFILE"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] Script interrupted by signal (Ctrl+C or Term)." | tee -a "$LOGFILE"
     fi
-    # The actual exit is handled by shell after trap finishes, or by `exit` in `notify_error`.
-    # To ensure a consistent exit code from the trap itself if `notify_error`'s `exit` is caught by `set -e` before trap:
-    # exit "$exit_code" # This might cause issues if trap is for normal exit.
 }
 trap 'cleanup_and_exit' EXIT SIGINT SIGTERM
+# Now it's safe to use the log() function.
 
+# === Debug Parsed Arguments (NOW IT'S SAFE TO LOG) ===
+log "DEBUG exec PARSED: PROOT_DISTRO=[$PROOT_DISTRO], NOTIFY=[$NOTIFY], REPO_DIR=[$REPO_DIR], VENV_DIR=[$VENV_DIR], PROOT_DISTRO_SPECIFIED_VIA_ARG=[$PROOT_DISTRO_SPECIFIED_VIA_ARG]"
 
 # === Initial Log Messages ===
 log "=== Starting Update Script ($SCRIPT_NAME) for NON-ROOTED device ==="
